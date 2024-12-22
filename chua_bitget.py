@@ -5,6 +5,9 @@ import logging
 import requests
 import json
 from logging.handlers import TimedRotatingFileHandler
+
+from ccxt import RequestTimeout
+
 from utils.logger import setup_logger
 
 
@@ -66,6 +69,9 @@ class MultiAssetTradingBot:
 
             # 如果 pos_mode 为 'single_mode'，则表示为单向持仓模式
             return pos_mode == 'hedge_mode'
+        except RequestTimeout:
+            self.logger.error("请求超时, 请设置代理, 修改proxies为你本地的代理")
+            return False
         except Exception as e:
             self.logger.error(f"获取账户信息时出错: {e}")
             return False
