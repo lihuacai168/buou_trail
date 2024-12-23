@@ -5,6 +5,7 @@ import logging
 import requests
 import json
 from logging.handlers import TimedRotatingFileHandler
+import argparse
 
 from ccxt import RequestTimeout
 
@@ -115,7 +116,7 @@ class MultiAssetTradingBot:
 
     def send_feishu_notification(self, message):
         if self.feishu:
-            return self.feishu.send_card_message("系统通知", message)
+            return self.feishu.send_card_message("自动交易机器人通知", message)
 
     def schedule_task(self):
         self.logger.info("启动主循环，开始执行任务调度...")
@@ -286,13 +287,44 @@ class MultiAssetTradingBot:
 
 
 if __name__ == '__main__':
-    with open('config.json', 'r') as f:
-        config_data = json.load(f)
+    # 创建命令行参数解析器
+    parser = argparse.ArgumentParser(description='Bitget Trading Bot')
+    parser.add_argument(
+        '-c', 
+        '--config', 
+        type=str,
+        default='config.json',
+        help='配置文件路径，默认为 config.json'
+    )
+    
+    # 解析命令行参数
+    args = parser.parse_args()
 
-    # 选择交易平台，假设这里选择 Bitget
-    platform_config = config_data['bitget']
-    feishu_webhook_url = config_data['feishu_webhook']
-    monitor_interval = config_data.get("monitor_interval", 4)  # 默认值为4秒
+    # 读取配置文件
+    try:
+        with open(args.config, 'r', encoding='utf-8') as f:
+            config_data = json.load(f)
 
-    bot = MultiAssetTradingBot(platform_config, feishu_webhook=feishu_webhook_url, monitor_interval=monitor_interval)
-    bot.schedule_task()
+        # 选择交易平台配置
+        platform_config = config_data['bitget']
+        feishu_webhook_url = config_data['feishu_webhook']
+        monitor_interval = config_data.get("monitor_interval", 4)  # 默认值为4秒
+
+        bot = MultiAssetTradingBot(
+            platform_config, 
+            feishu_webhook=feishu_webhook_url, 
+            monitor_interval=monitor_interval
+        )
+        bot.schedule_task()
+    except FileNotFoundError:
+        print(f"错误: 找不到配置文件 '{args.config}'")
+        exit(1)
+    except json.JSONDecodeError:
+        print(f"错误: 配置文件 '{args.config}' 格式不正确")
+        exit(1)
+    except KeyError as e:
+        print(f"错误: 配置文件缺少必要的配置项 {str(e)}")
+        exit(1)
+    except Exception as e:
+        print(f"错误: {str(e)}")
+        exit(1)
