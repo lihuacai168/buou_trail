@@ -9,6 +9,7 @@ from logging.handlers import TimedRotatingFileHandler
 from ccxt import RequestTimeout
 
 from utils.logger import setup_logger
+from utils.feishu_message import FeishuMessage
 
 
 class CustomBitget(ccxt.bitget):
@@ -17,6 +18,41 @@ class CustomBitget(ccxt.bitget):
             headers = {}
         headers['X-CHANNEL-API-CODE'] = 'tu3hz'
         return super().fetch(url, method, headers, body)
+
+
+def _generate_close_message(position, side):
+    """
+    生成平仓消息
+
+    Args:
+        position: 持仓信息
+        side: 交易方向
+
+    Returns:
+        str: 格式化的平仓消息
+    """
+    symbol = position['symbol']
+    amount = float(position['contracts'])
+    entry_price = float(position['entryPrice'])
+    current_price = float(position['markPrice'])
+
+    # 计算盈亏百分比
+    if side == 'long':
+        profit_pct = (current_price - entry_price) / entry_price * 100
+        profit_amount = (current_price - entry_price) * amount
+    else:  # short
+        profit_pct = (entry_price - current_price) / entry_price * 100
+        profit_amount = (entry_price - current_price) * amount
+
+    return (
+        f"平仓成功 {symbol}\n"
+        f"方向: {side}\n"
+        f"数量: {amount}\n"
+        f"开仓价格: {entry_price}\n"
+        f"平仓价格: {current_price}\n"
+        f"最终盈亏: {profit_pct:.2f}%\n"
+        f"盈亏金额: {profit_amount:.2f} USDT"
+    )
 
 
 class MultiAssetTradingBot:
@@ -30,6 +66,7 @@ class MultiAssetTradingBot:
         self.first_trail_profit_threshold = config["first_trail_profit_threshold"]
         self.second_trail_profit_threshold = config["second_trail_profit_threshold"]
         self.feishu_webhook = feishu_webhook
+        self.feishu = FeishuMessage(feishu_webhook) if feishu_webhook else None
         self.blacklist = set(config.get("blacklist", []))
         self.monitor_interval = monitor_interval  # 从配置文件读取的监控循环时间
 
@@ -77,17 +114,8 @@ class MultiAssetTradingBot:
             return False
 
     def send_feishu_notification(self, message):
-        if self.feishu_webhook:
-            try:
-                headers = {'Content-Type': 'application/json'}
-                payload = {"msg_type": "text", "content": {"text": message}}
-                response = requests.post(self.feishu_webhook, json=payload, headers=headers)
-                if response.status_code == 200:
-                    self.logger.info("飞书通知发送成功")
-                else:
-                    self.logger.error("飞书通知发送失败，状态码: %s", response.status_code)
-            except Exception as e:
-                self.logger.error("发送飞书通知时出现异常: %s", str(e))
+        if self.feishu:
+            return self.feishu.send_card_message("系统通知", message)
 
     def schedule_task(self):
         self.logger.info("启动主循环，开始执行任务调度...")
@@ -112,27 +140,42 @@ class MultiAssetTradingBot:
 
     def close_position(self, symbol, side):
         try:
-            # 获取当前持仓数量
             position = next((pos for pos in self.fetch_positions() if pos['symbol'] == symbol), None)
             if position is None or float(position['contracts']) == 0:
                 self.logger.info(f"{symbol} 仓位已平，无需继续平仓")
                 return True
 
-            amount = float(position['contracts'])  # 使用当前持仓数量进行一次性清仓
-
-            # 创建平仓订单，并加上 reduceOnly 参数
+            amount = float(position['contracts'])
+            entry_price = float(position['entryPrice'])
+            current_price = float(position['markPrice'])
+            
+            # 计算盈亏
+            if side == 'long':
+                profit_pct = (current_price - entry_price) / entry_price * 100
+                profit_amount = (current_price - entry_price) * amount
+            else:  # short
+                profit_pct = (entry_price - current_price) / entry_price * 100
+                profit_amount = (entry_price - current_price) * amount
 
             bg_symbol = symbol.replace("/", "").replace(":USDT", "")
-
-            # order = self.exchange.create_order(symbol, 'market', side, amount)
-            order = self.exchange.privateMixPostV2MixOrderClosePositions({'symbol': bg_symbol, 'holdSide': side, 'productType': 'USDT-FUTURES'})
+            order = self.exchange.privateMixPostV2MixOrderClosePositions({
+                'symbol': bg_symbol, 
+                'holdSide': side, 
+                'productType': 'USDT-FUTURES'
+            })
 
             if order['code'] == '00000' and order['data']['successList']:
                 self.logger.info(f"Closed position for {symbol} with size {amount}, side: {side}")
-                self.send_feishu_notification(f"Closed position for {symbol} with size {amount}, side: {side}")
-                self.detected_positions.pop(symbol, None)
-                self.highest_profits.pop(symbol, None)
-                self.current_tiers.pop(symbol, None)
+                if self.feishu:
+                    self.feishu.send_trade_notification(
+                        symbol=symbol,
+                        side=side,
+                        amount=amount,
+                        entry_price=entry_price,
+                        current_price=current_price,
+                        profit_pct=profit_pct,
+                        profit_amount=profit_amount
+                    )
                 return True
             else:
                 self.logger.error(f"Failed to close position for {symbol}: {order}")
@@ -224,7 +267,7 @@ class MultiAssetTradingBot:
                 self.logger.info(f"回撤到 {trail_stop_loss:.2f}% 止盈")
                 if profit_pct <= trail_stop_loss:
                     self.logger.info(
-                        f"{symbol} 达到利润回撤阈值，当前档位：第一档移动止盈，最高盈亏: {highest_profit:.2f}%，当前盈亏: {profit_pct:.2f}%，执行平仓")
+                        f"{symbol} 达到利润回撤阈值，当前档位：一档移动止盈，最高盈亏: {highest_profit:.2f}%，当前盈亏: {profit_pct:.2f}%，执行平仓")
                     self.close_position(symbol, side)
                     continue
 
